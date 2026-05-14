@@ -26,41 +26,64 @@ def test_forecaster_output_shape() -> None:
     horizon = 14
     quantiles = 3
     hidden = 32
+    num_accounts = 10
+    future_dim = 6
     
     model = ProbabilisticForecaster(
         input_dim=features,
+        num_accounts=num_accounts,
         hidden_dim=hidden,
         history_size=history,
         horizon=horizon,
-        num_quantiles=quantiles
+        num_quantiles=quantiles,
+        future_dim=future_dim
     )
     
     x = torch.randn(batch, history, features)
-    out = model(x)
+    future_x = torch.randn(batch, horizon, future_dim)
+    acc_idx = torch.randint(0, num_accounts, (batch,))
     
-    assert out.shape == (batch, horizon, quantiles)
+    probs, magnitudes = model(x, future_x, acc_idx)
+    
+    assert probs.shape == (batch, horizon)
+    assert magnitudes.shape == (batch, horizon, quantiles)
 
 
 def test_parameter_gradients() -> None:
     """Verifies that gradients flow back through the entire network."""
-    model = ProbabilisticForecaster(input_dim=5, hidden_dim=16)
+    num_accounts = 5
+    future_dim = 6
+    model = ProbabilisticForecaster(input_dim=5, num_accounts=num_accounts, hidden_dim=16, future_dim=future_dim)
     x = torch.randn(2, 60, 5)
-    out = model(x)
+    future_x = torch.randn(2, 14, future_dim)
+    acc_idx = torch.randint(0, num_accounts, (2,))
     
-    loss = out.sum()
+    probs, magnitudes = model(x, future_x, acc_idx)
+    
+    # Use both heads to ensure gradients flow everywhere
+    loss = probs.sum() + magnitudes.sum()
     loss.backward()
     
     # Check if encoder weights have gradients
     assert model.encoder.layers[0][0].weight.grad is not None
-    # Check if decoder weights have gradients
-    assert model.decoder[-1].weight.grad is not None
+    # Check if head GRN weights have gradients
+    assert model.magnitude_grn.lin1.weight.grad is not None
+    assert model.gate_grn.lin1.weight.grad is not None
+    # Check if account embedding has gradients
+    assert model.account_embedding.weight.grad is not None
 
 
 def test_different_horizons() -> None:
     """Ensures model adapts to different prediction horizons."""
     horizon = 7
-    model = ProbabilisticForecaster(input_dim=5, hidden_dim=16, horizon=horizon)
+    num_accounts = 5
+    future_dim = 6
+    model = ProbabilisticForecaster(input_dim=5, num_accounts=num_accounts, hidden_dim=16, horizon=horizon, future_dim=future_dim)
     x = torch.randn(2, 60, 5)
-    out = model(x)
+    future_x = torch.randn(2, horizon, future_dim)
+    acc_idx = torch.randint(0, num_accounts, (2,))
     
-    assert out.shape[1] == horizon
+    probs, magnitudes = model(x, future_x, acc_idx)
+    
+    assert probs.shape[1] == horizon
+    assert magnitudes.shape[1] == horizon

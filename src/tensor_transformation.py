@@ -7,6 +7,9 @@ import pandas as pd
 import torch
 
 
+from sklearn.preprocessing import StandardScaler
+
+
 class TensorTransformer:
     """Transforms featured financial data into 3D tensors (N, Time, Features).
 
@@ -23,6 +26,7 @@ class TensorTransformer:
         date_col: str = "date",
         feature_cols: List[str] = None,
         sequence_length: int = 90,
+        use_standardization: bool = True,
     ) -> None:
         """Initializes the transformer.
 
@@ -31,11 +35,14 @@ class TensorTransformer:
             date_col: Name of date column.
             feature_cols: List of feature column names. If None, defaults to basic features.
             sequence_length: Number of daily time steps per account.
+            use_standardization: Whether to apply Z-score normalization.
         """
         self.account_id_col = account_id_col
         self.date_col = date_col
         self.feature_cols = feature_cols or ["amount_log", "day_sin", "day_cos"]
         self.sequence_length = sequence_length
+        self.use_standardization = use_standardization
+        self.scaler = StandardScaler() if use_standardization else None
 
     def _get_continuous_series(self, group: pd.DataFrame) -> pd.DataFrame:
         """Ensures a group has a continuous daily frequency for the sequence length.
@@ -55,31 +62,30 @@ class TensorTransformer:
         date_range = pd.date_range(start=start_date, end=end_date, freq="D")
 
         # Reindex to fill missing days with 0/appropriate values
-        # Note: cyclical features like day_sin/cos should ideally be re-calculated for missing days
-        # but for this step we assume the input has them or we fill them.
         reindexed = group.reindex(date_range)
 
         # Fill missing transaction amounts with 0
         if "amount_log" in reindexed.columns:
             reindexed["amount_log"] = reindexed["amount_log"].fillna(0)
-
-        # Forward fill other features (like cyclical ones if they weren't in the range)
-        # or fill with 0 if they are rolling stats
+            
+        # Binary flags like is_weekend or is_month_end should be re-calculated 
+        # but we ffill for simplicity as they are usually already in the df
         reindexed = reindexed.ffill().fillna(0)
 
         return reindexed[self.feature_cols]
 
-    def transform(self, df: pd.DataFrame) -> torch.Tensor:
+    def transform(self, df: pd.DataFrame) -> Tuple[torch.Tensor, np.ndarray]:
         """Pivots the DataFrame into a 3D Tensor (N, T, F).
 
         Args:
             df: Featured DataFrame.
 
         Returns:
-            A PyTorch Tensor of shape (num_accounts, sequence_length, num_features).
+            Tuple containing:
+                - PyTorch Tensor of shape (N, T, F).
+                - Array of Account IDs of shape (N,).
         """
-        # Daily aggregation (in case of multiple transactions per day)
-        # We sum the amounts and take the first occurrence for other features (which should be identical per day)
+        # Daily aggregation
         agg_dict = {col: "first" for col in self.feature_cols}
         if "amount_log" in agg_dict:
             agg_dict["amount_log"] = "sum"
@@ -95,15 +101,21 @@ class TensorTransformer:
 
         for account_id in accounts:
             account_group = df_daily[df_daily[self.account_id_col] == account_id]
-
-            # Only process accounts with enough history (optional, here we pad/truncate)
             if len(account_group) > 0:
                 continuous_df = self._get_continuous_series(account_group)
                 tensor_list.append(continuous_df.values)
 
         # Stack into (N, T, F)
         np_3d = np.stack(tensor_list)
-        return torch.from_numpy(np_3d).float()
+        
+        # Apply Standardization across the (N*T, F) flatten view
+        if self.use_standardization:
+            N, T, F = np_3d.shape
+            np_2d = np_3d.reshape(-1, F)
+            np_2d = self.scaler.fit_transform(np_2d)
+            np_3d = np_2d.reshape(N, T, F)
+
+        return torch.from_numpy(np_3d).float(), accounts
 
     def get_metadata(self) -> dict:
         """Returns metadata about the transformation.

@@ -6,6 +6,49 @@ import torch
 import torch.nn as nn
 
 
+class FocalLoss(nn.Module):
+    """Focal Loss for addressing class imbalance in sparse time series.
+
+    Focal Loss down-weights easy examples and focuses on hard negative/positive 
+    samples, which is essential for capturing rare transaction spikes.
+    """
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0) -> None:
+        """Initializes Focal Loss.
+
+        Args:
+            alpha: Balancing factor for rare class.
+            gamma: Focusing parameter to reduce loss for well-classified samples.
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Calculates Focal Loss.
+
+        Args:
+            inputs: Probabilities (after Sigmoid).
+            targets: Binary labels.
+
+        Returns:
+            Mean loss value.
+        """
+        # Clamp to avoid log(0)
+        inputs = torch.clamp(inputs, min=1e-7, max=1.0 - 1e-7)
+        
+        # Binary Cross Entropy
+        bce = -targets * torch.log(inputs) - (1 - targets) * torch.log(1 - inputs)
+        
+        # pt and alpha_t calculation
+        pt = torch.where(targets == 1, inputs, 1 - inputs)
+        alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+        
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce
+        
+        return torch.mean(focal_loss)
+
+
 class QuantileLoss(nn.Module):
     """Implementation of the Pinball (Quantile) Loss function.
 
@@ -29,24 +72,24 @@ class QuantileLoss(nn.Module):
         """Calculates the average pinball loss across all quantiles.
 
         Args:
-            preds: Predicted quantiles of shape (Batch, Horizon, NumQuantiles).
-            target: Ground truth values of shape (Batch, Horizon).
+            preds: Predicted quantiles. Last dim must be NumQuantiles.
+            target: Ground truth values. Shape must match preds without last dim.
 
         Returns:
-            Mean loss value across all samples, steps, and quantiles.
+            Mean loss value across all samples and quantiles.
         """
         losses = []
         for i, q in enumerate(self.quantiles):
             # Extract predictions for the i-th quantile
-            # preds[:, :, i] has shape (Batch, Horizon)
-            errors = target - preds[:, :, i]
+            # Using ellipsis [..., i] handles both (B, H, Q) and (N_active, Q)
+            q_preds = preds[..., i]
+            errors = target - q_preds
             
             # Pinball loss formula
             quantile_loss = torch.max(q * errors, (q - 1) * errors)
             losses.append(quantile_loss.unsqueeze(-1))
 
-        # Combine losses for all quantiles
-        # Combined shape: (Batch, Horizon, NumQuantiles)
+        # Combined shape: same as preds
         combined_loss = torch.cat(losses, dim=-1)
         
         return torch.mean(combined_loss)

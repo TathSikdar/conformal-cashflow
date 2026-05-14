@@ -81,20 +81,74 @@ class TemporalFeatureEngineer:
         return df
 
     def handle_zero_inflation(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Applies log-transformation to handle high-variance/zero-inflated data.
+        """Applies a Symmetric Signed Log-Transformation.
 
-        Financial amounts often follow a power-law distribution. Log-scaling
-        stabilizes variance and brings the distribution closer to normal.
+        Preserves the sign of the cash flow (inflow/outflow) while stabilizing
+        variance for high-magnitude transactions.
+
+        Formula: sign(x) * log1p(abs(x))
 
         Args:
             df: The input DataFrame.
 
         Returns:
-            DataFrame with log-transformed amount column.
+            DataFrame with signed log-transformed amount column.
         """
-        # Use log1p (log(1+x)) to handle zeros and ensure positive values
-        # We assume amounts are absolute values or that we handle outflow/inflow separately
-        df[f"{self.amount_col}_log"] = np.log1p(df[self.amount_col].abs())
+        amounts = df[self.amount_col]
+        df[f"{self.amount_col}_log"] = np.sign(amounts) * np.log1p(np.abs(amounts))
+        return df
+
+    def add_lagged_features(self, df: pd.DataFrame, lags: list[int] = [1, 7]) -> pd.DataFrame:
+        """Adds lagged transaction features.
+
+        Args:
+            df: Input DataFrame.
+            lags: List of days to lag.
+
+        Returns:
+            DataFrame with lags.
+        """
+        for lag in lags:
+            df[f"amount_lag_{lag}"] = df.groupby(self.account_id_col)[f"{self.amount_col}_log"].shift(lag).fillna(0)
+        return df
+
+    def add_balance_feature(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Computes the cumulative running balance for each account.
+
+        State-based features are often more predictive than delta-based ones.
+
+        Args:
+            df: Input DataFrame.
+
+        Returns:
+            DataFrame with 'balance_log' feature.
+        """
+        df = df.sort_values(by=[self.account_id_col, self.date_col])
+        # Calculate cumulative sum of the raw amounts per account
+        df["balance"] = df.groupby(self.account_id_col)[self.amount_col].cumsum()
+        # Log-scale the balance (handling negative balances with signed-log)
+        df["balance_log"] = np.sign(df["balance"]) * np.log1p(np.abs(df["balance"]))
+        return df
+
+    def add_calendar_flags(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Adds binary flags for weekends and month-end periods.
+
+        Banking transactions often cluster around these periodic events.
+
+        Args:
+            df: Input DataFrame.
+
+        Returns:
+            DataFrame with calendar flags added.
+        """
+        # Weekends (Saturday=5, Sunday=6)
+        df["is_weekend"] = (df[self.date_col].dt.dayofweek >= 5).astype(float)
+        
+        # Month-End (Days 28-31)
+        # We also flag the first few days for 'start of month' logic if needed,
+        # but let's stick to 28-31 as requested for now.
+        df["is_month_end"] = (df[self.date_col].dt.day >= 28).astype(float)
+        
         return df
 
     def pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -107,6 +161,9 @@ class TemporalFeatureEngineer:
             DataFrame ready for tensorization.
         """
         df = self.add_cyclical_features(df)
+        df = self.add_calendar_flags(df)
         df = self.add_rolling_features(df)
         df = self.handle_zero_inflation(df)
+        df = self.add_lagged_features(df)
+        df = self.add_balance_feature(df)
         return df

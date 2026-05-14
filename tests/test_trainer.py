@@ -11,10 +11,15 @@ class MockModel(nn.Module):
     """Simple model for testing training loops."""
     def __init__(self):
         super().__init__()
-        self.linear = nn.Linear(5, 3) # Predict 3 quantiles for 1 horizon step
-    def forward(self, x):
-        # x: (Batch, History, Features) -> (Batch, 1, 3)
-        return self.linear(x.mean(dim=1)).unsqueeze(1)
+        self.gate_linear = nn.Linear(5, 1) 
+        self.magnitude_linear = nn.Linear(5, 3) 
+    def forward(self, x, future_x, acc_idx):
+        # x: (Batch, History, Features)
+        context = x.mean(dim=1)
+        # Simple dependency on future_x and acc_idx to ensure they are used
+        probs = torch.sigmoid(self.gate_linear(context) + future_x.mean() + acc_idx.float().mean())
+        magnitudes = self.magnitude_linear(context).unsqueeze(1)
+        return probs, magnitudes
 
 
 @pytest.fixture
@@ -22,15 +27,20 @@ def mock_setup():
     """Sets up a minimal training environment."""
     model = MockModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    criterion = lambda preds, target: torch.mean((preds.squeeze(1)[:, 1] - target.squeeze(1))**2) # Dummy MSE-like loss
     
-    # Data: (Batch, History, Features)
+    def dummy_criterion(magnitudes, target):
+        return torch.mean((magnitudes[:, 1] - target)**2)
+    
+    # Data: (x, future_x, acc_idx, y)
     x = torch.randn(10, 5, 5)
+    future_x = torch.randn(10, 1, 6)
+    acc_idx = torch.zeros(10, dtype=torch.long)
     y = torch.randn(10, 1)
-    dataset = TensorDataset(x, y)
+    
+    dataset = TensorDataset(x, future_x, acc_idx, y)
     loader = DataLoader(dataset, batch_size=2)
     
-    return model, optimizer, criterion, loader
+    return model, optimizer, dummy_criterion, loader
 
 
 def test_early_stopping():
@@ -75,7 +85,6 @@ def test_trainer_fit(mock_setup):
 def test_gradient_clipping(mock_setup):
     """Ensures gradient clipping is applied (smoke test)."""
     model, optimizer, criterion, loader = mock_setup
-    # Setting grad_clip very low
     trainer = Trainer(model, optimizer, criterion, grad_clip=1e-5)
     
     # Should run without error

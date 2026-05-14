@@ -41,17 +41,24 @@ class ConformalCalibrator:
         scores = []
 
         with torch.no_grad():
-            for x, y in cal_loader:
-                x, y = x.to(device), y.to(device)
-                # preds shape: (Batch, Horizon, 3) where [:,:,0] is 10th, [:,:,2] is 90th
-                preds = model(x)
+            for x, future_x, acc_idx, y in cal_loader:
+                x, future_x, acc_idx, y = (
+                    x.to(device), 
+                    future_x.to(device), 
+                    acc_idx.to(device), 
+                    y.to(device)
+                )
+                
+                # Forward with all inputs
+                probs, magnitudes = model(x, future_x, acc_idx)
+                
+                # Apply Hurdle weighting
+                preds = magnitudes * probs.unsqueeze(-1)
                 
                 y_low = preds[:, :, 0]
                 y_high = preds[:, :, 2]
                 
-                # Non-conformity score: E_i = max(y_low - y_i, y_i - y_high)
-                # If y_i is within [y_low, y_high], score is negative.
-                # If outside, score is positive (magnitude of the miss).
+                # Non-conformity score
                 batch_scores = torch.max(y_low - y, y - y_high)
                 scores.append(batch_scores.cpu().numpy().flatten())
 
@@ -66,21 +73,36 @@ class ConformalCalibrator:
         self.q_hat = np.quantile(all_scores, q_level, method="higher")
         return self.q_hat
 
-    def predict(self, model: nn.Module, x: torch.Tensor, device: str = "cpu") -> torch.Tensor:
+    def predict(
+        self, 
+        model: nn.Module, 
+        x: torch.Tensor, 
+        future_x: torch.Tensor, 
+        account_idx: torch.Tensor,
+        device: str = "cpu"
+    ) -> torch.Tensor:
         """Generates calibrated prediction intervals.
 
         Args:
             model: The trained model.
-            x: Input tensor of shape (Batch, History, Features).
+            x: Input tensor (Batch, History, F).
+            future_x: Future exogenous features (Batch, Horizon, FutureDim).
+            account_idx: Account indices (Batch,).
             device: Execution device.
 
         Returns:
-            Calibrated intervals of shape (Batch, Horizon, 2) -> [Low, High].
+            Calibrated intervals of shape (Batch, Horizon, 2).
         """
         model.eval()
         with torch.no_grad():
-            x = x.to(device)
-            preds = model(x) # (Batch, Horizon, 3)
+            x, future_x, account_idx = (
+                x.to(device), 
+                future_x.to(device), 
+                account_idx.to(device)
+            )
+            
+            probs, magnitudes = model(x, future_x, account_idx)
+            preds = magnitudes * probs.unsqueeze(-1) # (Batch, Horizon, 3)
             
             y_low = preds[:, :, 0]
             y_high = preds[:, :, 2]

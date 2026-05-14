@@ -8,6 +8,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 
+from src.loss import FocalLoss
+
+
 class EarlyStopping:
     """Closes training if validation loss doesn't improve after a set period."""
 
@@ -75,28 +78,39 @@ class Trainer:
         self.history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
 
     def train_epoch(self, train_loader: DataLoader) -> float:
-        """Runs one training epoch.
-
-        Args:
-            train_loader: DataLoader for the training set.
-
-        Returns:
-            The average training loss for the epoch.
-        """
+        """Runs one training epoch with personal context and future guidance."""
         self.model.train()
         total_loss = 0.0
+        gate_criterion = FocalLoss(alpha=0.75, gamma=2.0)
 
-        for x, y in train_loader:
-            x, y = x.to(self.device), y.to(self.device)
+        for x, future_x, acc_idx, y in train_loader:
+            x, future_x, acc_idx, y = (
+                x.to(self.device), 
+                future_x.to(self.device), 
+                acc_idx.to(self.device), 
+                y.to(self.device)
+            )
 
             self.optimizer.zero_grad()
-            preds = self.model(x)
-            loss = self.criterion(preds, y)
-            loss.backward()
-
-            # Gradient clipping to stabilize training
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             
+            # Forward with all inputs
+            probs, magnitudes = self.model(x, future_x, acc_idx)
+            
+            # 1. Classification Loss
+            target_gate = (y.abs() > 1e-5).float()
+            loss_gate = gate_criterion(probs, target_gate)
+            
+            # 2. Magnitude Loss
+            mask = target_gate > 0.5
+            if mask.any():
+                loss_magnitude = self.criterion(magnitudes[mask], y[mask])
+            else:
+                loss_magnitude = 0.0
+            
+            loss = loss_gate + loss_magnitude
+            
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()
             total_loss += loss.item()
 
@@ -105,23 +119,29 @@ class Trainer:
         return avg_loss
 
     def validate(self, val_loader: DataLoader) -> float:
-        """Runs validation.
-
-        Args:
-            val_loader: DataLoader for the validation set.
-
-        Returns:
-            The average validation loss.
-        """
+        """Runs validation with personal context."""
         self.model.eval()
         total_loss = 0.0
+        gate_criterion = FocalLoss(alpha=0.75, gamma=2.0)
 
         with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(self.device), y.to(self.device)
-                preds = self.model(x)
-                loss = self.criterion(preds, y)
-                total_loss += loss.item()
+            for x, future_x, acc_idx, y in val_loader:
+                x, future_x, acc_idx, y = (
+                    x.to(self.device), 
+                    future_x.to(self.device), 
+                    acc_idx.to(self.device), 
+                    y.to(self.device)
+                )
+                
+                probs, magnitudes = self.model(x, future_x, acc_idx)
+                
+                target_gate = (y.abs() > 1e-5).float()
+                loss_gate = gate_criterion(probs, target_gate)
+                
+                mask = target_gate > 0.5
+                loss_magnitude = self.criterion(magnitudes[mask], y[mask]) if mask.any() else 0.0
+                
+                total_loss += (loss_gate + loss_magnitude).item()
 
         avg_loss = total_loss / len(val_loader)
         self.history["val_loss"].append(avg_loss)

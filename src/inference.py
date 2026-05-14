@@ -3,6 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -26,9 +27,11 @@ class CashFlowInferenceAgent:
         model: nn.Module,
         calibrator: ConformalCalibrator,
         feature_cols: List[str],
+        account_id_map: Dict[Any, int],
         sequence_length: int = 60,
         horizon: int = 14,
         device: str = "cpu",
+        exog_indices: list[int] = [2, 3, 4, 5, 6, 7],
     ) -> None:
         """Initializes the inference agent.
 
@@ -36,14 +39,18 @@ class CashFlowInferenceAgent:
             model: Trained ProbabilisticForecaster model.
             calibrator: Fitted ConformalCalibrator.
             feature_cols: List of feature names used during training.
+            account_id_map: Map of account_id to integer index.
             sequence_length: Look-back window size.
             horizon: Prediction horizon.
             device: Execution device.
+            exog_indices: Feature indices for future guidance.
         """
         self.model = model.to(device)
         self.calibrator = calibrator
         self.device = device
         self.horizon = horizon
+        self.account_id_map = account_id_map
+        self.exog_indices = exog_indices
         
         # Initialize pipeline components
         self.ingestor = FinancialDataIngestor()
@@ -53,42 +60,97 @@ class CashFlowInferenceAgent:
             sequence_length=sequence_length
         )
 
-    def predict_calibrated(self, raw_data: Union[str, pd.DataFrame]) -> Dict[str, Any]:
+    def _get_future_features(self, last_date: pd.Timestamp) -> torch.Tensor:
+        """Generates future calendar features for the horizon."""
+        future_dates = pd.date_range(
+            start=last_date + pd.Timedelta(days=1), 
+            periods=self.horizon, 
+            freq="D"
+        )
+        # Create a dummy DataFrame to run through the feature engineer
+        dummy_df = pd.DataFrame({"date": future_dates})
+        dummy_df["account_id"] = 0 # Dummy
+        dummy_df["amount"] = 0.0 # Dummy
+        
+        # We only need cyclical features and calendar flags
+        dummy_df = self.engineer.add_cyclical_features(dummy_df)
+        dummy_df = self.engineer.add_calendar_flags(dummy_df)
+        
+        # Extract the same exogenous features used in training
+        exog_cols = [
+            "day_sin", "day_cos", "month_sin", "month_cos", 
+            "is_weekend", "is_month_end"
+        ]
+        
+        # Filter to only include columns that are actually in feature_cols
+        full_cols = self.transformer.feature_cols
+        exog_cols = [c for c in exog_cols if c in full_cols]
+        
+        np_exog = dummy_df[exog_cols].values
+        
+        if self.transformer.scaler:
+            # Create a dummy row of all features to pass through the scaler
+            full_row = np.zeros((self.horizon, len(full_cols)))
+            for i, col in enumerate(exog_cols):
+                idx = full_cols.index(col)
+                full_row[:, idx] = np_exog[:, i]
+            
+            # Transform everything
+            full_row = self.transformer.scaler.transform(full_row)
+            
+            # Extract just the exogenous parts back
+            standardized_exog = []
+            for col in exog_cols:
+                idx = full_cols.index(col)
+                standardized_exog.append(full_row[:, idx])
+            np_exog = np.stack(standardized_exog, axis=1)
+
+        return torch.from_numpy(np_exog).float().unsqueeze(0) # (1, H, FutureDim)
+
+    def predict_calibrated(self, raw_data: pd.DataFrame) -> Dict[str, Any]:
         """Generates calibrated forecasts from raw transaction data.
 
         Args:
-            raw_data: Path to CSV or a pandas DataFrame.
+            raw_data: Pandas DataFrame for a SINGLE account.
 
         Returns:
-            Dictionary containing calibrated forecasts and metadata.
+            Dictionary containing calibrated forecasts.
         """
-        # 1. Ingestion
-        if isinstance(raw_data, str):
-            df = self.ingestor.load_data(raw_data)
-        else:
-            df = raw_data
-
-        # 2. Cleaning & Features
-        df = self.ingestor.clean_data(df)
+        # 1. Ingestion & Features
+        df = self.ingestor.clean_data(raw_data)
+        last_date = df["date"].max()
+        account_id = df["account_id"].iloc[0]
+        
         df = self.engineer.pipeline(df)
 
-        # 3. Tensor Transformation
-        # transform returns (N, T, F). We assume a single account for point-inference.
-        x_tensor = self.transformer.transform(df)
+        # 2. Tensor Transformation
+        # transform now returns (tensor, ids)
+        x_tensor, _ = self.transformer.transform(df)
+        
+        # 3. Future Features & Account ID mapping
+        future_x = self._get_future_features(last_date)
+        acc_idx_int = self.account_id_map.get(account_id, 0) # Default to 0 if new
+        acc_idx = torch.tensor([acc_idx_int], dtype=torch.long)
         
         # 4. Inference & Calibration
-        # Conformal prediction expands the intervals
-        cal_intervals = self.calibrator.predict(self.model, x_tensor, device=self.device)
+        cal_intervals = self.calibrator.predict(
+            self.model, x_tensor, future_x, acc_idx, device=self.device
+        )
         
-        # Get point forecast (median) from raw model
+        # Point forecast
         self.model.eval()
         with torch.no_grad():
-            raw_preds = self.model(x_tensor.to(self.device))
-            median_forecast = raw_preds[:, :, 1] # Index 1 is the 50th percentile
+            probs, magnitudes = self.model(
+                x_tensor.to(self.device), 
+                future_x.to(self.device), 
+                acc_idx.to(self.device)
+            )
+            raw_preds = magnitudes * probs.unsqueeze(-1)
+            median_forecast = raw_preds[:, :, 1]
 
         # 5. Formatting Output
-        # Taking the first account in the batch
         output = {
+            "account_id": str(account_id),
             "forecast_horizon": self.horizon,
             "predictions": []
         }

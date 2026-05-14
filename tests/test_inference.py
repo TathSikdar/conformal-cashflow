@@ -12,29 +12,38 @@ from src.calibration import ConformalCalibrator
 def integration_setup():
     """Sets up a mock production environment."""
     # 1. Mock Model
-    input_dim = 3 # amount_log, day_sin, day_cos
+    # Features: amount_log (target), day_sin, day_cos (exog)
+    feature_cols = ["amount_log", "day_sin", "day_cos"]
+    input_dim = len(feature_cols)
     hidden_dim = 16
     horizon = 7
+    num_accounts = 5
+    future_dim = 2 # day_sin, day_cos
+    
     model = ProbabilisticForecaster(
         input_dim=input_dim, 
+        num_accounts=num_accounts,
         hidden_dim=hidden_dim, 
-        horizon=horizon
+        horizon=horizon,
+        future_dim=future_dim
     )
     
     # 2. Mock Calibrator
     calibrator = ConformalCalibrator(alpha=0.1)
-    calibrator.q_hat = 0.5 # Pre-computed during training phase
+    calibrator.q_hat = 0.5 
     
-    # 3. Features
-    feature_cols = ["amount_log", "day_sin", "day_cos"]
+    # 3. Account Map
+    account_id_map = {1: 0}
     
     # 4. Agent
     agent = CashFlowInferenceAgent(
         model=model,
         calibrator=calibrator,
         feature_cols=feature_cols,
-        sequence_length=30,
-        horizon=horizon
+        account_id_map=account_id_map,
+        sequence_length=60,
+        horizon=horizon,
+        exog_indices=[1, 2] # day_sin, day_cos
     )
     
     return agent, horizon
@@ -46,9 +55,9 @@ def test_full_pipeline_inference(integration_setup):
     
     # Create mock raw data (Relational format)
     data = {
-        "account_id": [1] * 40,
-        "date": pd.date_range(start="1993-01-01", periods=40, freq="D"),
-        "amount": [100.0] * 40
+        "account_id": [1] * 80,
+        "date": pd.date_range(start="1993-01-01", periods=80, freq="D"),
+        "amount": [100.0] * 80
     }
     raw_df = pd.DataFrame(data)
     
@@ -60,8 +69,6 @@ def test_full_pipeline_inference(integration_setup):
     assert result["forecast_horizon"] == horizon
     assert len(result["predictions"]) == horizon
     
-    # Check interval logic: lower < median < upper (usually, if model is sane)
-    # Since model is untrained, we just check existence and types
     first_step = result["predictions"][0]
     assert isinstance(first_step["median"], float)
     assert isinstance(first_step["lower_90"], float)
