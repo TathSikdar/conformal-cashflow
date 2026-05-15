@@ -17,41 +17,54 @@ Financial transaction data is highly sparse (zero-inflated). To address this, we
 - **Quantile Head:** Predicts conditional magnitudes using **Magnitude-Weighted Quantile Loss** ($L = \text{Pinball} \times (|y| + \epsilon)$).
 
 The final point forecast is a "Sharp Median" derived via **Threshold Inference**: 
-$$\hat{y}_{median} = \mathbb{I}(P(trans) > \gamma) \cdot \hat{y}_{\tau=0.5}$$
+
+$$
+\hat{y}_{median} = \mathbb{I}(P(trans) > \gamma) \cdot \hat{y}_{\tau=0.5}
+$$
+
 where $\gamma$ is a trained hurdle threshold (e.g., 0.4), preventing the mathematical "blurring" of discrete cash flow events.
 
 **2. Sharpness Incentives: Sequence-Level Losses**
 
 Standard point-wise losses often result in "flat" mean-regressed forecasts. We implement a three-pronged **Sequence Sharpness Loss** to force the model to capture the rhythm and volume of the cash flow:
-- **Volume Loss:** $\mathcal{L}_{vol} = |\sum \hat{y} - \sum y|$, enforcing conservation of mass over the 14-day horizon.
-- **Variance Penalty:** $\mathcal{L}_{var} = \text{ReLU}(\text{Var}(y) - \text{Var}(\hat{y}))$, rewarding the model for producing realistic "spiky" variance.
+- **Volume Loss:** 
+  
+$$
+\mathcal{L}_{vol} = |\sum \hat{y} - \sum y|
+$$
+
+enforcing conservation of mass over the 14-day horizon.
+
+- **Variance Penalty:** 
+
+$$
+\mathcal{L}_{var} = \text{ReLU}(\text{Var}(y) - \text{Var}(\hat{y}))
+$$
+
+rewarding the model for producing realistic "spiky" variance.
+
 - **Gaussian-Smoothed Shape Loss:** We apply a **1D Gaussian Kernel** smoothing to both sequences before calculating the Pearson Correlation. This creates a "temporal tolerance radius," rewarding the model for being *close* in timing, which provides smoother gradients for the attention mechanism.
 
 **3. Architectural Forcing: Direct Lag Injection**
 
 To prevent "Signal Washout" in deep attention layers, we implement **Direct Lag Injection**. Raw transaction amounts from significant periodic offsets (7, 14, and 28 days ago) are extracted from history and concatenated directly to the final output heads. This guarantees that the model has unfiltered access to historical rhythms right before prediction, bypassing the attention bottleneck.
 
-<<<<<<< HEAD
-1. **Calibration Set:** Hold out a validation set of size $n$.
-2. **Non-conformity Scores:** Calculate the heuristic error on the calibration set:
-   
+**4. Uncertainty Quantification: Conformal Calibration**
+
+Neural networks are notoriously overconfident. We apply **Split Conformal Prediction** on top of the model's heuristic intervals to provide distribution-free, mathematically proven coverage guarantees:
+
+1. **Non-conformity Scores:** Calculate the heuristic error on the calibration set:
+
 $$
 E_i = \max(\hat{y}_{\text{low}} - y_i, y_i - \hat{y}_{\text{high}})
 $$
 
-4. **Quantile Computation:** Find the $\lceil(n + 1)(1 - \alpha)\rceil/n$ empirical quantile of the scores, denoted as $\hat{q}$.
-5. **Calibrated Intervals:** Expand the test predictions by $\hat{q}$:
-
-$$[\hat{y}_{\text{low}} - \hat{q}, \hat{y}_{\text{high}} + \hat{q}]
-$$
-=======
-**4. Uncertainty Quantification: Conformal Calibration**
-
-Neural networks are notoriously overconfident. We apply **Split Conformal Prediction** on top of the model's heuristic intervals to provide distribution-free, mathematically proven coverage guarantees:
-1. **Non-conformity Scores:** $E_i = \max(\hat{y}_{low} - y_i, y_i - \hat{y}_{high})$ calculated on a hold-out set.
 2. **Empirical Quantile:** Find $\hat{q}$, the $(1-\alpha)$ quantile of these scores.
-3. **Guaranteed Bounds:** Expand heuristic predictions: $[\hat{y}_{low} - \hat{q}, \hat{y}_{high} + \hat{q}]$.
->>>>>>> 637e708 (feat: implement high-fidelity forecasting with auto-iterative sharpness search)
+3. **Guaranteed Bounds:** Expand heuristic predictions to achieve targeted coverage:
+
+$$
+[\hat{y}_{\text{low}} - \hat{q}, \hat{y}_{\text{high}} + \hat{q}]
+$$
 
 This ensures that the true cash flow falls within our predicted bounds exactly $1 - \alpha$% of the time (e.g., 90% coverage).
 
