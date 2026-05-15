@@ -26,12 +26,13 @@ Neural networks are notoriously overconfident. To achieve **Trustworthy AI**, we
 
 1. **Calibration Set:** Hold out a validation set of size $n$.
 2. **Non-conformity Scores:** Calculate the heuristic error on the calibration set:
-
+   
 $$
 E_i = \max(\hat{y}_{\text{low}} - y_i, y_i - \hat{y}_{\text{high}})
 $$
-3. **Quantile Computation:** Find the $\lceil(n + 1)(1 - \alpha)\rceil/n$ empirical quantile of the scores, denoted as $\hat{q}$.
-4. **Calibrated Intervals:** Expand the test predictions by $\hat{q}$: $[\hat{y}_{low} - \hat{q}, \hat{y}_{high} + \hat{q}]$.
+
+4. **Quantile Computation:** Find the $\lceil(n + 1)(1 - \alpha)\rceil/n$ empirical quantile of the scores, denoted as $\hat{q}$.
+5. **Calibrated Intervals:** Expand the test predictions by $\hat{q}$: $[\hat{y}_{low} - \hat{q}, \hat{y}_{high} + \hat{q}]$.
 
 This ensures that the true cash flow falls within our predicted bounds exactly $1 - \alpha$% of the time (e.g., 90% coverage).
 
