@@ -53,9 +53,9 @@ To prevent "Signal Washout" in deep attention layers, we implement **Direct Lag 
 
 Neural networks are notoriously overconfident. We apply **Split Conformal Prediction** on top of the model's heuristic intervals to provide distribution-free, mathematically proven coverage guarantees:
 
-1. **Non-conformity Scores:** Calculate the heuristic error on the calibration set: $E_i = \max(\hat{y}_{\text{low}} - y_i, y_i - \hat{y}_{\text{high}})$.
+1. **Non-conformity Scores:** Calculate the heuristic error on the calibration set: $E_i = \max(\hat{y}_{\text{low}} - y_i, y_i - \hat{y}_{\text{high}})$ .
 2. **Empirical Quantile:** Find $\hat{q}$, the $(1-\alpha)$ quantile of these scores.
-3. **Guaranteed Bounds:** Expand heuristic predictions to achieve targeted coverage: $[\hat{y}_{\text{low}} - \hat{q}, \hat{y}_{\text{high}} + \hat{q}]$.
+3. **Guaranteed Bounds:** Expand heuristic predictions to achieve targeted coverage: $[\hat{y}_{\text{low}} - \hat{q}, \hat{y}_{\text{high}} + \hat{q}]$ .
 
 This ensures that the true cash flow falls within our predicted bounds exactly $1 - \alpha$% of the time (e.g., 90% coverage).
 
