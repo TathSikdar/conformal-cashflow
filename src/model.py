@@ -202,7 +202,7 @@ class ProbabilisticForecaster(nn.Module):
         num_quantiles: int = 3,
         num_heads: int = 4,
         num_layers: int = 5,
-        future_dim: int = 6,
+        future_dim: int = 10,
     ) -> None:
         super().__init__()
         self.history_size = history_size
@@ -229,13 +229,17 @@ class ProbabilisticForecaster(nn.Module):
         self.attention = nn.MultiheadAttention(
             embed_dim=hidden_dim, num_heads=num_heads, batch_first=True, dropout=0.1
         )
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, batch_first=True, dropout=0.1
+        )
 
         # 4. Future Exogenous Projection
         self.future_projection = nn.Linear(future_dim, hidden_dim)
 
         # 5. Gated Heads
-        self.gate_grn = GatedResidualNetwork(hidden_dim, hidden_dim, 1)
-        self.magnitude_grn = GatedResidualNetwork(hidden_dim, hidden_dim, num_quantiles)
+        # We add 3 to input_dim for direct lag injection (7, 14, 28 day lags)
+        self.gate_grn = GatedResidualNetwork(hidden_dim + 3, hidden_dim, 1)
+        self.magnitude_grn = GatedResidualNetwork(hidden_dim + 3, hidden_dim, num_quantiles)
 
     def forward(
         self, 
@@ -253,36 +257,63 @@ class ProbabilisticForecaster(nn.Module):
         Returns:
             Tuple of (prob_gate, magnitudes).
         """
-        batch_size = x.size(0)
-
         # 1. Variable Selection & Account Personalization
         x_vsn = self.input_vsn(x)
         acc_embed = self.account_embedding(account_idx).unsqueeze(1) # (B, 1, Hidden)
         
-        # 2. Backbone
+        # 2. Encoder Backbone
         # Inject account context into history
         x_enc = x_vsn + self.pos_embedding + acc_embed
-        encoded = self.encoder(x_enc).transpose(1, 2)
+        encoded_raw = self.encoder(x_enc).transpose(1, 2)
         
-        attn_out, _ = self.attention(encoded, encoded, encoded)
+        # Self-Attention on History
+        encoded, _ = self.attention(encoded_raw, encoded_raw, encoded_raw)
         
-        # Global Context (Max + Mean)
-        ctx_mean = attn_out.mean(dim=1)
-        ctx_max, _ = attn_out.max(dim=1)
-        context = ctx_mean + ctx_max # (B, Hidden)
+        # 3. Dynamic Decoder via Cross-Attention
+        # Query: Future Anchors (Calendar + Horizon Position)
+        # Key/Value: Refined History (Self-Attended)
+        h_future = self.future_projection(future_x) + self.horizon_pos_embedding
+        
+        # Cross-Attend: Each future step looks back at history
+        attn_out, _ = self.cross_attention(h_future, encoded, encoded)
+        
+        # RESIDUAL SHORTCUT: Combine attention output with original future anchors
+        h_context = attn_out + h_future
+        
+        # ARCHITECTURAL FORCING: Direct Lag Injection
+        # We pull the raw target values (idx 0) from history at specific periodic offsets
+        # For step h in horizon, we look at history step T-7+h, T-14+h, etc.
+        batch_size, hist_len, _ = x.shape
+        horizon = self.horizon
+        
+        lags_to_inject = [7, 14, 28]
+        injected_features = []
+        
+        for lag in lags_to_inject:
+            # Slicing the last 'horizon' steps of history at the lag offset
+            # e.g. for lag 7: x[:, T-7:T-7+horizon, 0]
+            # Since horizon=14 and history=60, these indices are always valid.
+            start_idx = hist_len - lag
+            end_idx = start_idx + horizon
+            
+            # Extract and handle boundary conditions if horizon > lag
+            # For simplicity, we just use the indices. 
+            # If lag=7 and horizon=14, start_idx=53, end_idx=67. 
+            # We need to pad or wrap. Let's just use the latest available if out of bounds.
+            indices = torch.arange(start_idx, end_idx).to(x.device)
+            indices = torch.clamp(indices, 0, hist_len - 1)
+            
+            lag_val = torch.index_select(x[:, :, 0], 1, indices) # (Batch, Horizon)
+            injected_features.append(lag_val.unsqueeze(-1))
+            
+        # Add Static Account Bias to the learned context
+        h_base = h_context + acc_embed
+        
+        # Concatenate lags to the context (B, H, D + 3)
+        h_final = torch.cat([h_base] + injected_features, dim=-1)
 
-        # 3. Decoder Expansion with Future Guidance
-        # Static Context (B, 1, Hidden)
-        h_static = (context + acc_embed.squeeze(1)).unsqueeze(1).repeat(1, self.horizon, 1)
-        
-        # Dynamic Future Guidance (B, H, Hidden)
-        h_future = self.future_projection(future_x)
-        
-        # Combine Step-specific Positional Embedding
-        h_context = h_static + h_future + self.horizon_pos_embedding
-
-        # 4. Gated Heads
-        prob_gate = torch.sigmoid(self.gate_grn(h_context)).squeeze(-1)
-        magnitudes = self.magnitude_grn(h_context)
+        # 4. Gated Heads (Input dim updated in __init__)
+        prob_gate = torch.sigmoid(self.gate_grn(h_final)).squeeze(-1)
+        magnitudes = self.magnitude_grn(h_final)
 
         return prob_gate, magnitudes

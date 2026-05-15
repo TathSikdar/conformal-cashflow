@@ -13,12 +13,19 @@ class MockModel(nn.Module):
         super().__init__()
         self.gate_linear = nn.Linear(5, 1) 
         self.magnitude_linear = nn.Linear(5, 3) 
+        
     def forward(self, x, future_x, acc_idx):
         # x: (Batch, History, Features)
         context = x.mean(dim=1)
+        batch_size = x.size(0)
+        horizon = future_x.size(1)
+        
         # Simple dependency on future_x and acc_idx to ensure they are used
-        probs = torch.sigmoid(self.gate_linear(context) + future_x.mean() + acc_idx.float().mean())
-        magnitudes = self.magnitude_linear(context).unsqueeze(1)
+        # probs: (Batch, Horizon)
+        probs = torch.sigmoid(self.gate_linear(context)).repeat(1, horizon)
+        # magnitudes: (Batch, Horizon, Quantiles)
+        magnitudes = self.magnitude_linear(context).unsqueeze(1).repeat(1, horizon, 1)
+        
         return probs, magnitudes
 
 
@@ -29,13 +36,15 @@ def mock_setup():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     
     def dummy_criterion(magnitudes, target):
+        # magnitudes: (N_active, 3), target: (N_active,)
         return torch.mean((magnitudes[:, 1] - target)**2)
     
     # Data: (x, future_x, acc_idx, y)
+    # Using horizon > 1 to support SequenceSharpnessLoss (variance/correlation)
     x = torch.randn(10, 5, 5)
-    future_x = torch.randn(10, 1, 6)
+    future_x = torch.randn(10, 2, 6) # Horizon 2
     acc_idx = torch.zeros(10, dtype=torch.long)
-    y = torch.randn(10, 1)
+    y = torch.randn(10, 2) # Horizon 2
     
     dataset = TensorDataset(x, future_x, acc_idx, y)
     loader = DataLoader(dataset, batch_size=2)

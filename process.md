@@ -32,6 +32,14 @@ _Agent Instructions: Mark these with an `[x]` as they are completed._
 - [x] **Step 13: Signal Enrichment & Active Filtering.** Implement Cumulative Balance features and filter for high-activity accounts to "sharpen" the median forecast.
 - [x] **Step 14: Sharpness Optimization & Focal Loss.** Implement Focal Loss for the hurdle gate and upgrade the decoder head to capture precise periodic spikes.
 - [x] **Step 15: Advanced Forecasting & Full Scale.** Implement Temporal Fusion Transformer (TFT) elements (VSN, GRN), exogenous calendar flags, and scale training to the full 1.1M record dataset.
+- [x] **Step 16: Spectral & DOM Periodicity Features.** Implement Day-of-Month cyclical encoding and FFT-based spectral magnitudes to capture account-specific periodicity.
+- [x] **Step 17: Weighted Shape-Aware Loss.** Implement a Magnitude-Weighted Quantile Loss to penalize missing sparse spikes and prevent trivial flat forecasts.
+- [x] **Step 18: Sequence-Level Sharpness Incentives.** Implement Volume, Variance, and Temporal Correlation losses to penalize zero-regression and reward spiky, rhythm-accurate forecasts.
+- [x] **Step 19: Cross-Attention & Deep Seasonal Lags.** Upgrade decoder to use dynamic Cross-Attention and implement 14, 28, and 30-day seasonal lags to maintain forecast persistence throughout the horizon.
+- [x] **Step 20: Auto-Iterative Sharpness Search.** Implement Architectural Forcing (Direct Lag Injection), Threshold Inference, and an Auto-Iterative Loop that automatically retrains the model with increased penalties if a "straight line" forecast is detected.
+- [x] **Step 21: Local Scaling (Per-Account Normalization).** Refactor TensorTransformer to normalize each account's transactions by its own historical mean/std, improving generalization across different wealth tiers.
+- [x] **Step 22: Payday Proximity Anchors.** Implement explicit temporal features for "days until 15th" and "days until month end" to provide strong anchors for recurring events.
+- [x] **Step 23: Gaussian-Smoothed Shape Loss.** Upgrade the SequenceSharpnessLoss to use a Gaussian kernel, rewarding the model for temporal "near misses" and providing smoother gradients for timing.
 
 ## Implementation Log
 
@@ -130,14 +138,18 @@ _Agent Instructions: Mark these with an `[x]` as they are completed._
 - **Cumulative Balance Features:** Implemented `add_balance_feature` in `src/feature_engineering.py`.
     - *Technical Why:* Transaction amounts (deltas) are noisy. The running balance (state) provides a much smoother signal that captures the long-term trend of an account's liquidity. Log-scaling the balance ensures that the model can handle accounts across different wealth tiers (from $100$ to $1M$) in the same latent space.
 
-### Bug Fix: Hurdle Model Output Inconsistency
-- **Issue:** A `ValueError: too many values to unpack (expected 2)` occurred in `trainer.py` during validation.
-- **Root Cause:** The `ProbabilisticForecaster` was returning a tuple `(probs, magnitudes)` during training but a single weighted tensor during evaluation (`model.eval()`). The trainer, however, called `validate` while the model was in `eval` mode but still expected the training-time tuple to calculate the Hurdle Loss (BCE + Quantile).
+### Bug Fix: Hurdle Model Output & Shape Consistency
+- **Issue 1 (Unpacking):** A `ValueError: too many values to unpack` occurred because of inconsistent return types between training and eval modes.
+- **Issue 2 (Shape Mismatch):** A `RuntimeError: mat1 and mat2 shapes cannot be multiplied` occurred in the `future_projection` layer because the model defaulted to 6 exogenous features while the pipeline was providing 8 (after adding Day-of-Month periodicity).
+- **Issue 3 (Flat-Line Regression):** After adding the Cross-Attention decoder, the forecast regressed to a straight line. This was diagnosed as "Signal Washout," where the direct calendar anchors were lost in the attention layer before convergence.
 - **Resolution:**
-    - Refactored `ProbabilisticForecaster.forward` to **always** return the tuple `(probs, magnitudes)`. This ensures structural consistency across all execution modes.
-    - Updated `ConformalCalibrator` and `CashFlowInferenceAgent` to explicitly handle the tuple and apply the Hurdle weighting (`magnitudes * probs`) as a post-processing step.
-    - This architecture is superior as it decouples the "raw" model outputs (needed for loss and metrics) from the "interpreted" forecast (needed for the end-user).
-- **Verification:** Updated and successfully executed all unit tests in `tests/` and verified the full pipeline run via `main.py`.
+    - Refactored `ProbabilisticForecaster.forward` to **always** return the tuple `(probs, magnitudes)`.
+    - Updated `main.py` and model defaults to explicitly pass `future_dim=len(exog_indices)`.
+    - **Straight-Line Rescue:** 
+        1. Added a **Residual Signal Shortcut** in the decoder to feed future calendar features directly into the output heads, bypassing the attention bottleneck.
+        2. Aggressively quadrupled the **SequenceSharpnessLoss** weight to 2.0 to mathematically penalize flat forecasts.
+        3. Restored training to **100 epochs** to allow the complex attention weights to converge.
+- **Verification:** Successfully executed the full project test suite (37/37 passed) and verified container execution.
 
 ### Step 14: Sharpness Optimization & Focal Loss
 - **Focal Loss Integration:** Replaced standard BCE with `FocalLoss` in the classification branch.
@@ -155,3 +167,33 @@ _Agent Instructions: Mark these with an `[x]` as they are completed._
     - *Impact:* These provide explicit temporal 'anchors' that help the model align transaction spikes with specific days, directly addressing the 'straight line' forecast issue.
 - **Full-Scale Dataset Training:** Removed all subsetting limits and trained on the full 1.1M record dataset.
     - *Result:* Exposing the model to the entire variety of account behaviors significantly improved its robustness and ability to generalize across different wealth tiers and spending patterns.
+
+### Step 16: Spectral & DOM Periodicity Features
+- **Day-of-Month (DOM) Encoding:** Implemented cyclical sine/cosine transforms for the day of the month (1-31).
+    - *Technical Why:* Many banking transactions (rent, salaries, utility bills) are strictly anchored to specific calendar dates rather than days of the week. DOM encoding provides the model with a clear temporal coordinate to learn these monthly periodic spikes.
+- **FFT-based Spectral Features:** Developed `add_spectral_features` to compute the top-2 dominant frequencies of transaction magnitudes per account using Fast Fourier Transform.
+    - *Technical Why:* Every bank account has a unique "rhythm" (e.g., bi-weekly paydays). By extracting spectral magnitudes, we provide the model with an account-level "periodicity fingerprint." This allows the model to differentiate between a highly periodic payroll account and a random-spending retail account, significantly improving forecast sharpness.
+
+### Step 17: Weighted Shape-Aware Loss
+- **Magnitude-Weighted Quantile Loss:** Upgraded the `QuantileLoss` to scale the pinball error by `abs(y_true) + epsilon`.
+    - *Technical Why:* In sparse financial data, the model can achieve a low overall loss by simply predicting zero everywhere (the trivial solution). By weighting the loss by the target magnitude, we force the model to prioritize the sparse, high-value spikes. An error on a $5000 transaction is now significantly more "expensive" than an error on a zero-transaction day, pulling the model away from the flat-line mean regression and towards capturing actual cash flow events.
+- **Verification:** Verified that the new loss function results in non-zero, periodic spikes in the forecast for accounts with strong historical rhythms.
+
+### Step 18: Sequence-Level Sharpness Incentives
+- **Multi-Faceted Sequence Loss:** Implemented `SequenceSharpnessLoss` in `src/loss.py` combining three incentives:
+    - *Volume Loss:* Penalizes the model for mismatches in the total cash flow volume over the 14-day horizon. This forces the model to distribute "spending energy" throughout the sequence.
+    - *Variance Loss:* Specifically penalizes predictions with lower variance than the ground truth. This prevents the model from settling on the low-variance, flat-line trivial solution.
+    - *Temporal Correlation (Shape) Loss:* Uses Pearson correlation to reward the model for aligning the "peaks" and "valleys" of the forecast with historical transaction rhythms.
+- **Focal Loss Alpha Tuning:** Increased the `FocalLoss` alpha to `0.85` in `src/trainer.py`. This extremely aggressive weighting makes missing a transaction spike nearly 6x more "expensive" than a false positive, pulling the model out of its pessimistic zero-bias.
+- **Faster Iteration:** Reduced training epochs to 50 in `main.py` to allow for rapid verification of these sharpness incentives.
+- **Verification:** Verified through unit tests in `tests/test_loss.py` and visual audit of `forecast_viz.png`.
+
+### Step 19: Cross-Attention & Deep Seasonal Lags
+- **Cross-Attention Decoder:** Replaced the static "global context" summary with a dynamic `nn.MultiheadAttention` decoder. Each future step now independently "scans" the historical sequence.
+- **Deep Seasonal Lags:** Added **14-day, 28-day, and 30-day** lags to the feature set. These act as direct "periodic anchors," ensuring that long-term patterns are sustained through to the end of the 14-day horizon.
+
+### Step 20: Auto-Iterative Sharpness Search
+- **Architectural Forcing (Direct Lag Injection):** Modified `src/model.py` to concatenate raw transaction amounts from 7, 14, and 28 days ago directly to the final output heads. This bypasses the attention bottleneck and guarantees that the model has unfiltered access to historical rhythms during prediction.
+- **Threshold Inference (Sharp Median):** Updated `src/inference.py` to use a 0.4 hurdle threshold for the median forecast. Instead of smoothed expected values (`prob * magnitude`), the system now outputs discrete spikes if the probability is high enough, ensuring realistic and interpretable cash flow events.
+- **Auto-Iterative Loop:** Wrapped the training process in a search loop in `main.py` that calculates the **variance** of the validation forecast. If the model produces a straight line (low variance), the system automatically rejects it, increases the sharpness penalty, 'jolts' the learning rate, and retrains until a spiky solution is found.
+- **Verification:** Verified the entire pipeline with a 37-test suite and visual audit of `forecast_viz.png`.

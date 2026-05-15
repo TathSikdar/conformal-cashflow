@@ -27,7 +27,7 @@ class CashFlowDataset(Dataset):
         history_size: int = 60,
         horizon: int = 14,
         target_idx: int = 0,
-        exog_indices: list[int] = [2, 3, 4, 5, 6, 7],
+        exog_indices: list[int] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
     ) -> None:
         """Initializes the dataset.
 
@@ -92,7 +92,9 @@ def create_dataloader(
     shuffle: bool = True,
     history_size: int = 60,
     horizon: int = 14,
-    exog_indices: list[int] = [2, 3, 4, 5, 6, 7],
+    exog_indices: list[int] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    num_workers: int = 0,
+    pin_memory: bool = False,
 ) -> DataLoader:
     """Factory function to create a DataLoader.
 
@@ -103,6 +105,8 @@ def create_dataloader(
         history_size: Look-back window.
         horizon: Forecast horizon.
         exog_indices: Indices of features available for the future.
+        num_workers: Number of subprocesses for data loading.
+        pin_memory: Whether to use pinned memory for faster GPU transfer.
 
     Returns:
         A configured PyTorch DataLoader.
@@ -113,4 +117,10 @@ def create_dataloader(
         horizon=horizon,
         exog_indices=exog_indices
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )

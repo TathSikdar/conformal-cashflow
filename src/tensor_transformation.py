@@ -1,6 +1,6 @@
 """Module for transforming flat DataFrames into 3D tensors for PyTorch."""
 
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -43,6 +43,10 @@ class TensorTransformer:
         self.sequence_length = sequence_length
         self.use_standardization = use_standardization
         self.scaler = StandardScaler() if use_standardization else None
+        
+        # Local stats for per-account normalization: {account_id: (mean, std)}
+        # We only track this for the target column (idx 0)
+        self.local_stats: Dict[Any, Tuple[float, float]] = {}
 
     def _get_continuous_series(self, group: pd.DataFrame) -> pd.DataFrame:
         """Ensures a group has a continuous daily frequency for the sequence length.
@@ -103,19 +107,53 @@ class TensorTransformer:
             account_group = df_daily[df_daily[self.account_id_col] == account_id]
             if len(account_group) > 0:
                 continuous_df = self._get_continuous_series(account_group)
-                tensor_list.append(continuous_df.values)
+                
+                vals = continuous_df.values.copy()
+                
+                # LOCAL SCALING: Normalize target (idx 0) per account
+                if self.use_standardization:
+                    target_vals = vals[:, 0]
+                    
+                    # Fit-Once logic: Only compute stats if we haven't seen this account before
+                    if account_id not in self.local_stats:
+                        mean = np.mean(target_vals)
+                        std = np.std(target_vals) + 1e-8
+                        self.local_stats[account_id] = (mean, std)
+                    
+                    mean, std = self.local_stats[account_id]
+                    vals[:, 0] = (target_vals - mean) / std
+                
+                tensor_list.append(vals)
 
         # Stack into (N, T, F)
         np_3d = np.stack(tensor_list)
         
-        # Apply Standardization across the (N*T, F) flatten view
+        # Apply Global Standardization for the REST of the features (idx 1:)
+        # This keeps cyclical and binary features in a good range
         if self.use_standardization:
             N, T, F = np_3d.shape
-            np_2d = np_3d.reshape(-1, F)
-            np_2d = self.scaler.fit_transform(np_2d)
-            np_3d = np_2d.reshape(N, T, F)
+            if F > 1:
+                other_features = np_3d[:, :, 1:].reshape(-1, F-1)
+                scaled_others = self.scaler.fit_transform(other_features)
+                np_3d[:, :, 1:] = scaled_others.reshape(N, T, F-1)
 
         return torch.from_numpy(np_3d).float(), accounts
+
+    def inverse_transform_target(self, account_id: Any, scaled_vals: np.ndarray) -> np.ndarray:
+        """Inverts the local scaling for the target column.
+
+        Args:
+            account_id: The identifier for the account.
+            scaled_vals: The normalized predicted values.
+
+        Returns:
+            Values in the original (log) scale.
+        """
+        if not self.use_standardization or account_id not in self.local_stats:
+            return scaled_vals
+            
+        mean, std = self.local_stats[account_id]
+        return (scaled_vals * std) + mean
 
     def get_metadata(self) -> dict:
         """Returns metadata about the transformation.

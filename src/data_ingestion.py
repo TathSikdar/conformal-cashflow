@@ -110,3 +110,23 @@ class FinancialDataIngestor(DataIngestor):
         df = df.sort_values(by=[self.account_id_col, self.date_col])
 
         return df.reset_index(drop=True)
+
+    def preprocess_berka(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Applies Berka-specific signing logic (Inflow vs Outflow).
+
+        In the PKDD'99 dataset, 'PRIJEM' signifies inflow (positive)
+        and 'VYDAJ' signifies outflow (negative).
+
+        Args:
+            df: DataFrame with 'type' and 'amount' columns.
+
+        Returns:
+            DataFrame with signed amounts.
+        """
+        df = df.copy() # Avoid SettingWithCopyWarning
+        if "type" in df.columns:
+            df[self.amount_col] = df.apply(
+                lambda x: x[self.amount_col] if x["type"] == "PRIJEM" else -x[self.amount_col], 
+                axis=1
+            )
+        return df

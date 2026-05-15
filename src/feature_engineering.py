@@ -50,6 +50,51 @@ class TemporalFeatureEngineer:
         df["month_sin"] = np.sin(2 * np.pi * month / 12)
         df["month_cos"] = np.cos(2 * np.pi * month / 12)
 
+        # Day of Month (1-31)
+        dom = df[self.date_col].dt.day
+        df["dom_sin"] = np.sin(2 * np.pi * dom / 31)
+        df["dom_cos"] = np.cos(2 * np.pi * dom / 31)
+
+        return df
+
+    def add_spectral_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Adds spectral magnitude features using FFT.
+
+        Captures account-specific periodicity by identifying dominant
+        frequencies in transaction history.
+
+        Args:
+            df: The input DataFrame.
+
+        Returns:
+            DataFrame with 'spectral_top_1' and 'spectral_top_2' features.
+        """
+        # Ensure data is sorted
+        df = df.sort_values(by=[self.account_id_col, self.date_col])
+        
+        def get_top_frequencies(group: pd.Series) -> pd.Series:
+            # We need a dense series for FFT to be meaningful
+            # For this feature, we use the raw group as is (assuming daily dense already)
+            vals = group.values
+            if len(vals) < 8: # Not enough data for meaningful FFT
+                return pd.Series([0.0, 0.0], index=["spectral_top_1", "spectral_top_2"])
+            
+            # Compute FFT magnitudes
+            fft_vals = np.abs(np.fft.rfft(vals - np.mean(vals)))
+            # Sort and take top 2 (excluding DC component if we didn't subtract mean)
+            top_indices = np.argsort(fft_vals)[-2:]
+            top_mags = fft_vals[top_indices]
+            
+            # Normalize by sequence length
+            top_mags = top_mags / len(vals)
+            
+            return pd.Series(top_mags[::-1], index=["spectral_top_1", "spectral_top_2"])
+
+        # Apply per account and unstack to get columns
+        spectral = df.groupby(self.account_id_col)[f"{self.amount_col}"].apply(get_top_frequencies).unstack().reset_index()
+        
+        # Merge back
+        df = df.merge(spectral, on=self.account_id_col, how="left")
         return df
 
     def add_rolling_features(
@@ -98,7 +143,7 @@ class TemporalFeatureEngineer:
         df[f"{self.amount_col}_log"] = np.sign(amounts) * np.log1p(np.abs(amounts))
         return df
 
-    def add_lagged_features(self, df: pd.DataFrame, lags: list[int] = [1, 7]) -> pd.DataFrame:
+    def add_lagged_features(self, df: pd.DataFrame, lags: list[int] = [1, 7, 14, 28, 30]) -> pd.DataFrame:
         """Adds lagged transaction features.
 
         Args:
@@ -131,7 +176,7 @@ class TemporalFeatureEngineer:
         return df
 
     def add_calendar_flags(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Adds binary flags for weekends and month-end periods.
+        """Adds binary flags for weekends, month-ends, and payday anchors.
 
         Banking transactions often cluster around these periodic events.
 
@@ -139,15 +184,22 @@ class TemporalFeatureEngineer:
             df: Input DataFrame.
 
         Returns:
-            DataFrame with calendar flags added.
+            DataFrame with calendar flags and payday anchors added.
         """
         # Weekends (Saturday=5, Sunday=6)
         df["is_weekend"] = (df[self.date_col].dt.dayofweek >= 5).astype(float)
         
         # Month-End (Days 28-31)
-        # We also flag the first few days for 'start of month' logic if needed,
-        # but let's stick to 28-31 as requested for now.
         df["is_month_end"] = (df[self.date_col].dt.day >= 28).astype(float)
+        
+        # PAYDAY ANCHORS: Countdown to key dates
+        day = df[self.date_col].dt.day
+        
+        # Days until 15th (clipped for normalization)
+        df["days_to_15th"] = (15 - day).clip(lower=-15, upper=15) / 15.0
+        
+        # Days until month end
+        df["days_to_month_end"] = (df[self.date_col].dt.days_in_month - day) / 31.0
         
         return df
 
@@ -162,6 +214,7 @@ class TemporalFeatureEngineer:
         """
         df = self.add_cyclical_features(df)
         df = self.add_calendar_flags(df)
+        df = self.add_spectral_features(df)
         df = self.add_rolling_features(df)
         df = self.handle_zero_inflation(df)
         df = self.add_lagged_features(df)

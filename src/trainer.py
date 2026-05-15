@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 
-from src.loss import FocalLoss
+from src.loss import FocalLoss, SequenceSharpnessLoss
 
 
 class EarlyStopping:
@@ -58,6 +58,7 @@ class Trainer:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         device: str = "cpu",
         grad_clip: float = 1.0,
+        sharpness_weight: float = 2.0,
     ) -> None:
         """Initializes the Trainer.
 
@@ -68,6 +69,7 @@ class Trainer:
             scheduler: Optional learning rate scheduler.
             device: Device to run training on ('cpu' or 'cuda').
             grad_clip: Maximum norm for gradient clipping.
+            sharpness_weight: Initial weight for sequence sharpness loss.
         """
         self.model = model.to(device)
         self.optimizer = optimizer
@@ -75,13 +77,16 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.grad_clip = grad_clip
+        self.sharpness_weight = sharpness_weight
         self.history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
 
     def train_epoch(self, train_loader: DataLoader) -> float:
         """Runs one training epoch with personal context and future guidance."""
         self.model.train()
         total_loss = 0.0
-        gate_criterion = FocalLoss(alpha=0.75, gamma=2.0)
+        # Aggressive alpha to penalize missing spikes
+        gate_criterion = FocalLoss(alpha=0.85, gamma=2.0)
+        sharpness_criterion = SequenceSharpnessLoss()
 
         for x, future_x, acc_idx, y in train_loader:
             x, future_x, acc_idx, y = (
@@ -96,18 +101,24 @@ class Trainer:
             # Forward with all inputs
             probs, magnitudes = self.model(x, future_x, acc_idx)
             
-            # 1. Classification Loss
+            # 1. Classification Loss (Hurdle Gate)
             target_gate = (y.abs() > 1e-5).float()
             loss_gate = gate_criterion(probs, target_gate)
             
-            # 2. Magnitude Loss
+            # 2. Magnitude Loss (Quantile Regression)
             mask = target_gate > 0.5
             if mask.any():
                 loss_magnitude = self.criterion(magnitudes[mask], y[mask])
             else:
                 loss_magnitude = 0.0
             
-            loss = loss_gate + loss_magnitude
+            # 3. Sequence-Level Sharpness (Volume, Variance, Shape)
+            # y_expected = P(trans) * MedianMagnitude
+            y_expected = probs * magnitudes[:, :, 1]
+            loss_sharpness = sharpness_criterion(y_expected, y)
+            
+            # Combined Loss with aggressive sharpness weight to break flat regression
+            loss = loss_gate + loss_magnitude + self.sharpness_weight * loss_sharpness
             
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
@@ -122,7 +133,8 @@ class Trainer:
         """Runs validation with personal context."""
         self.model.eval()
         total_loss = 0.0
-        gate_criterion = FocalLoss(alpha=0.75, gamma=2.0)
+        gate_criterion = FocalLoss(alpha=0.85, gamma=2.0)
+        sharpness_criterion = SequenceSharpnessLoss()
 
         with torch.no_grad():
             for x, future_x, acc_idx, y in val_loader:
@@ -141,7 +153,10 @@ class Trainer:
                 mask = target_gate > 0.5
                 loss_magnitude = self.criterion(magnitudes[mask], y[mask]) if mask.any() else 0.0
                 
-                total_loss += (loss_gate + loss_magnitude).item()
+                y_expected = probs * magnitudes[:, :, 1]
+                loss_sharpness = sharpness_criterion(y_expected, y)
+                
+                total_loss += (loss_gate + loss_magnitude + self.sharpness_weight * loss_sharpness).item()
 
         avg_loss = total_loss / len(val_loader)
         self.history["val_loss"].append(avg_loss)

@@ -7,10 +7,10 @@ from src.dataset import CashFlowDataset, create_dataloader
 
 @pytest.fixture
 def mock_tensor() -> torch.Tensor:
-    """Creates a mock 3D tensor (2 accounts, 20 days, 3 features)."""
-    # Features: [Amount, FeatureB, FeatureC]
-    # Filling with sequential values to verify slicing
-    t = torch.zeros((2, 20, 3))
+    """Creates a mock 3D tensor (2 accounts, 20 days, 12 features)."""
+    # Features: [Amount, FeatureB, ..., FeatureL]
+    # N=2, T=20, F=12 (to match default exog_indices [2...11])
+    t = torch.zeros((2, 20, 12))
     for i in range(20):
         t[:, i, 0] = float(i)  # Amount is the day index
     return t
@@ -31,9 +31,11 @@ def test_dataset_item_shapes(mock_tensor: torch.Tensor) -> None:
     history = 10
     horizon = 5
     dataset = CashFlowDataset(mock_tensor, history_size=history, horizon=horizon)
-    x, y = dataset[0]
+    x, future_x, acc_idx, y = dataset[0]
     
-    assert x.shape == (10, 3)
+    assert x.shape == (10, 12)
+    assert future_x.shape == (5, 10) # default exog_indices [2...11]
+    assert isinstance(acc_idx, int)
     assert y.shape == (5,)
 
 
@@ -44,7 +46,7 @@ def test_sliding_window_logic(mock_tensor: torch.Tensor) -> None:
     dataset = CashFlowDataset(mock_tensor, history_size=history, horizon=horizon)
     
     # First sample (idx 0)
-    x0, y0 = dataset[0]
+    x0, future_x0, acc_idx0, y0 = dataset[0]
     # x0 should be days 0 to 9
     assert x0[0, 0] == 0.0
     assert x0[9, 0] == 9.0
@@ -53,7 +55,7 @@ def test_sliding_window_logic(mock_tensor: torch.Tensor) -> None:
     assert y0[4] == 14.0
 
     # Second sample (idx 1)
-    x1, y1 = dataset[1]
+    x1, future_x1, acc_idx1, y1 = dataset[1]
     # x1 should be days 1 to 10
     assert x1[0, 0] == 1.0
     assert x1[9, 0] == 10.0
@@ -71,8 +73,10 @@ def test_dataloader_batching(mock_tensor: torch.Tensor) -> None:
         horizon=5
     )
     
-    batch_x, batch_y = next(iter(dataloader))
-    assert batch_x.shape == (4, 10, 3)
+    batch_x, batch_future_x, batch_acc_idx, batch_y = next(iter(dataloader))
+    assert batch_x.shape == (4, 10, 12)
+    assert batch_future_x.shape == (4, 5, 10)
+    assert batch_acc_idx.shape == (4,)
     assert batch_y.shape == (4, 5)
 
 

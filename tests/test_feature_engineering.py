@@ -26,10 +26,26 @@ def test_cyclical_features(clean_df: pd.DataFrame) -> None:
     assert "day_cos" in df.columns
     assert "month_sin" in df.columns
     assert "month_cos" in df.columns
+    assert "dom_sin" in df.columns
+    assert "dom_cos" in df.columns
 
     # Verify cyclical property: sin^2 + cos^2 = 1
     np.testing.assert_allclose(df["day_sin"]**2 + df["day_cos"]**2, 1.0)
     np.testing.assert_allclose(df["month_sin"]**2 + df["month_cos"]**2, 1.0)
+    np.testing.assert_allclose(df["dom_sin"]**2 + df["dom_cos"]**2, 1.0)
+
+
+def test_spectral_features(clean_df: pd.DataFrame) -> None:
+    """Verifies FFT-based spectral feature extraction."""
+    engineer = TemporalFeatureEngineer()
+    df = engineer.add_spectral_features(clean_df)
+
+    assert "spectral_top_1" in df.columns
+    assert "spectral_top_2" in df.columns
+    
+    # Magnitudes should be non-negative
+    assert (df["spectral_top_1"] >= 0).all()
+    assert (df["spectral_top_2"] >= 0).all()
 
 
 def test_rolling_features(clean_df: pd.DataFrame) -> None:
@@ -70,6 +86,7 @@ def test_pipeline_execution(clean_df: pd.DataFrame) -> None:
 
     expected_cols = [
         "day_sin", "day_cos", "month_sin", "month_cos",
+        "dom_sin", "dom_cos", "spectral_top_1", "spectral_top_2",
         "rolling_mean_7", "rolling_std_7", "amount_log"
     ]
     for col in expected_cols:

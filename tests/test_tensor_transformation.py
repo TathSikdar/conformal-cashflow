@@ -25,15 +25,17 @@ def test_tensor_shape(featured_df: pd.DataFrame) -> None:
     features = ["amount_log", "day_sin", "day_cos"]
     transformer = TensorTransformer(
         sequence_length=sequence_length,
-        feature_cols=features
+        feature_cols=features,
+        use_standardization=False
     )
     
-    tensor = transformer.transform(featured_df)
+    tensor, account_ids = transformer.transform(featured_df)
     
     # N = 2 unique accounts
     # T = 10 days
     # F = 3 features
     assert tensor.shape == (2, 10, 3)
+    assert len(account_ids) == 2
     assert isinstance(tensor, torch.Tensor)
 
 
@@ -42,10 +44,11 @@ def test_continuous_reindexing(featured_df: pd.DataFrame) -> None:
     sequence_length = 5
     transformer = TensorTransformer(
         sequence_length=sequence_length,
-        feature_cols=["amount_log"]
+        feature_cols=["amount_log"],
+        use_standardization=False
     )
     
-    tensor = transformer.transform(featured_df)
+    tensor, _ = transformer.transform(featured_df)
     
     # Account 1 has dates Jan 1, 2, 5. 
     # With T=5 and end_date=Jan 5, range is Jan 1, 2, 3, 4, 5.
