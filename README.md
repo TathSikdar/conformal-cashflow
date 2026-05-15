@@ -32,7 +32,7 @@ E_i = \max(\hat{y}_{\text{low}} - y_i, y_i - \hat{y}_{\text{high}})
 $$
 
 4. **Quantile Computation:** Find the $\lceil(n + 1)(1 - \alpha)\rceil/n$ empirical quantile of the scores, denoted as $\hat{q}$.
-5. **Calibrated Intervals:** Expand the test predictions by $\hat{q}$: $[\hat{y}_{low} - \hat{q}, \hat{y}_{high} + \hat{q}]$.
+5. **Calibrated Intervals:** Expand the test predictions by $\hat{q}$: $[\hat{y}_{\text{low}} - \hat{q}, \hat{y}_{\text{high}} + \hat{q}]$.
 
 This ensures that the true cash flow falls within our predicted bounds exactly $1 - \alpha$% of the time (e.g., 90% coverage).
 
