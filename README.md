@@ -1,7 +1,5 @@
 # Probabilistic Cash Flow Agent
 
-**Layer 6 AI Engineering Blueprint | Trustworthy Time-Series Forecasting**
-
 ## System Overview
 
 In enterprise banking, point-estimate predictions for cash flow are insufficient. Treasury and liquidity management require rigorous uncertainty quantification to balance capital efficiency with risk. The **Probabilistic Cash Flow Agent** is an advanced forecasting pipeline designed to predict future account balances and transaction volumes while providing statistically rigorous confidence intervals.
